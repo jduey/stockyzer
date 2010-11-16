@@ -1,0 +1,8 @@
+pom.xml
+*jar
+lib
+classes
+*.swp
+clojars
+*.svg
+*.csv
