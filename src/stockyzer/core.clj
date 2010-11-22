@@ -3,12 +3,102 @@
      [clojure.contrib.monads]
      [clojure.contrib.prxml]
      [stockyzer.monad-parser]
+     [arrows.core]
      [conduit.core])
   (:import
      java.text.DateFormat
      [java.io FileWriter FileReader BufferedReader])
   (:require
      [conduit.require :as conduit]))
+
+;; The primitive data type in CPL is a bar. A bar is represented as
+;; a hash-map that at a minimum contains a key of :bar and a value
+;; which is an integer. Bar vectors are a collection of bars with
+;; sequential :bar values stored in a vector sorted in ascending
+;; order of their :bar values.
+;;
+;; A pattern is represented as a hash-map with at least a key of:
+;; :extract-patterns - a function that returns a list of  all the instances
+;;                     of a pattern in a bar vector, longest first.
+;; :constrained - optional function that further contstrains pattern instances
+;;
+;; The length of a pattern instance is defined as the number of bars it spans.
+;;
+;; A pattern instance is represented by a hash-map with the following keys:
+;; :anchors - significant bars in the pattern
+;; :span - a hash-map containing the :bar values of the :first and :last bar
+;; :subs - if a pattern is a composition of other patterns, the instances of
+;;         those component patterns.
+
+(defn find-insts [p bars]
+  "Returns a list of instances of pattern 'p' found
+  in 'bars', in order from longest to shortest."
+  (filter (get p :constrained identity)
+          ((:extract-patterns p) bars)))
+
+(defn bar-index [bar-num bars]
+  "find the index of the bar in 'bars' that has a :bar
+  value equal to 'bar-num'"
+  (ffirst (drop-while #(not= bar-num (:bar (second %)))
+                      (indexed bars))))
+
+(defarrow cpl
+          a-arr (fn [f]
+                  {:extract-patterns f})
+
+          a-comp (fn [p1 p2]
+                   {:extract-patterns
+                    (fn [bars]
+                      (for [i1 (find-insts p1 bars)
+                            i2 (find-insts p2 (subvec bars
+                                                      (inc
+                                                        (:last (:span i1)))))
+                            :when (= (last (:anchors i1))
+                                     (first (:anchors i2)))]
+                        {:anchors (concat (:anchors i1) (rest (:anchors i2)))
+                         :span {:first (:bar (first (:anchors i1)))
+                                :last (:bar (last (:anchors i2)))}
+                         :subs [i1 i2]}))})
+
+          a-nth (fn [n p]
+                  {:extract-patterns
+                   (fn [bar-vecs]
+                     (for [inst (find-insts p (bar-vecs n))]
+                       (let [first-bar (bar-index (first (:bars inst))
+                                                  (bar-vecs n))
+                             last-bar (inc (bar-index (last (:bars inst))
+                                                      (bar-vecs n)))
+                             new-bar-vecs (into [] (map #(subvec % first-bar last-bar)
+                                                        bar-vecs))]
+                         (assoc new-bar-vecs n inst))))})
+
+          a-par (fn [p1 p2]
+                  {:extract-patterns
+                   (fn [bar-vecs]
+                     (remove nil?
+                             (for [[i1 bars2] (find-insts (a-nth 0 p1) bar-vecs)]
+                               (let [i2 (first (find-insts p2 bars2))]
+                                 (when (= (:span i1) (:span i2))
+                                   {:anchors (reduce #(if (some (partial = %2) %1)
+                                                        %1
+                                                        (conj %1 %2))
+                                                     (:anchors i1)
+                                                     (:anchors i2))
+                                    :span (:span i1)
+                                    :subs [i1 i2]})))))})
+
+          a-all (fn [p1 p2]
+                  {:extract-patterns
+                   (fn [bars]
+                     (find-insts (a-par p1 p2)
+                                 [bars bars]))})
+  )
+
+(defn constrained-by [p f]
+  (assoc p :constrained f))
+
+(def followed-by (:a-comp cpl))
+(def overlay (:a-all cpl))
 
 ;; http://ichart.finance.yahoo.com/table.csv?s=SPY&d=10&e=14&f=2010&g=d&a=0&b=29&c=1993&ignore=.csv
 
